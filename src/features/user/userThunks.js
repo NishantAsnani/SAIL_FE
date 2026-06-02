@@ -1,0 +1,45 @@
+import { createAsyncThunk } from "@reduxjs/toolkit";
+import {secureFetch} from "../../utils/secureFetch";
+
+export const signup = createAsyncThunk(
+  "user/signup",
+  async (req_data, { rejectWithValue }) => {
+    try {
+      const response = await secureFetch(
+        "/api/user/signup",
+        req_data,
+        "POST"
+      );
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.message);
+    }
+  }
+);
+
+export const login = createAsyncThunk('user/login', async(req_data) => {
+    const url = `/api/user/Login`;
+
+    const response = await secureFetch(url, req_data, 'POST');
+    return response;
+})
+
+
+export const getUserInfo = createAsyncThunk(
+  "user/getUserInfo",
+  async (_, { rejectWithValue }) => {
+    try {
+      const token = JSON.parse(localStorage.getItem("token"));
+      const response = await secureFetch(
+        "/api/user/getProfile",
+        {},
+        "GET",
+        token
+      );
+      
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.message);
+    }
+  }
+);
