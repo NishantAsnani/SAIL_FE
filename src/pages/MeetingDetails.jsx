@@ -26,6 +26,7 @@ const MeetingDetails = () => {
     const checkStatus = async () => {
       try {
         const actionResult = await dispatch(getMeetingById(meetingId));
+        
 
         if (getMeetingById.fulfilled.match(actionResult)) {
             const data = actionResult.payload;

@@ -11,7 +11,7 @@ import { downloadMom } from "../services/momApi";
 import { raiseJiraTicket } from "../services/jiraApi";
 import {connectToJira} from "../services/connectJiraApi";
 import { getUserInfo } from "../features/user/userThunks";
-
+import socket from "../utils/socket"
 import {
   ArrowTrendingUpIcon,
   UsersIcon,
@@ -325,18 +325,13 @@ const Dashboard = () => {
   const [downloading, setDownloading] = useState(false);
   const { user, loading: userLoading } = useSelector((state) => state.user);
   const [momStatus, setMomStatus] = useState("loading"); // loading | pending | processing | completed | failed
+  const [processingStage, setProcessingStage] = useState("uploaded"); // uploaded | transcription-completed | analyzing-metrics-completed
   const pollingRef = useRef(null);
   const token = JSON.parse(localStorage.getItem("token"));
 
-  const { data: metrics, loading, error } = useSelector(
-    (state) => state.metrics
-  );
+  const { data: metrics, loading, error } = useSelector((state) => state.metrics);
+  const { shortSummary, longSummary } = useSelector((state) => state.tasks);
 
-  const { shortSummary, longSummary } = useSelector(
-    (state) => state.tasks
-  );
-
-  // --- MomStatus Polling ---
   const fetchStatus = async () => {
     try {
       const res = await axios.get(
@@ -353,37 +348,60 @@ const Dashboard = () => {
   };
 
   useEffect(() => {
-    const startPolling = async () => {
+    let cancelled = false;
+
+    const handleTranscriptionCompleted = ({ meetingId: id }) => {
+      if (id !== meetingId) return;
+      setProcessingStage("transcription-completed");
+    };
+
+    const handleAnalyzingMetricsCompleted = ({ meetingId: id }) => {
+      if (id !== meetingId) return;
+      setProcessingStage("analyzing-metrics-completed");
+    };
+
+    const handleMomCompleted = ({ meetingId: completedMeetingId }) => {
+      if (completedMeetingId !== meetingId) return;
+      setMomStatus("completed");
+      dispatch(getMeetingMetrics(meetingId));
+      dispatch(getMeetingTasks(meetingId));
+    };
+
+    socket.on("transcription-completed", handleTranscriptionCompleted);
+    socket.on("analyzing-metrics-completed", handleAnalyzingMetricsCompleted);
+    socket.on("mom-completed", handleMomCompleted);
+
+    const initialize = async () => {
       const status = await fetchStatus();
+      if (cancelled) return;
 
       if (status === "completed") {
-        // Data is ready — fetch everything
         dispatch(getMeetingMetrics(meetingId));
         dispatch(getMeetingTasks(meetingId));
+        socket.off("transcription-completed", handleTranscriptionCompleted);
+        socket.off("analyzing-metrics-completed", handleAnalyzingMetricsCompleted);
+        socket.off("mom-completed", handleMomCompleted);
         return;
       }
 
-      if (status === "failed") return; // Show error UI
-
-      // Status is pending or processing — start polling
-      pollingRef.current = setInterval(async () => {
-        const s = await fetchStatus();
-        if (s === "completed") {
-          clearInterval(pollingRef.current);
-          dispatch(getMeetingMetrics(meetingId));
-          dispatch(getMeetingTasks(meetingId));
-        } else if (s === "failed") {
-          clearInterval(pollingRef.current);
-        }
-      }, 5000);
+      if (status === "failed") {
+        socket.off("transcription-completed", handleTranscriptionCompleted);
+        socket.off("analyzing-metrics-completed", handleAnalyzingMetricsCompleted);
+        socket.off("mom-completed", handleMomCompleted);
+        return;
+      }
+      // still pending/processing — listeners already attached
     };
 
-    startPolling();
+    initialize();
 
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
+      cancelled = true;
+      socket.off("transcription-completed", handleTranscriptionCompleted);
+      socket.off("analyzing-metrics-completed", handleAnalyzingMetricsCompleted);
+      socket.off("mom-completed", handleMomCompleted);
     };
-  }, [dispatch, meetingId]);
+  }, [meetingId, dispatch]);
 
   // --- Processing Overlay (pending / processing) ---
   if (momStatus === "loading" || momStatus === "pending" || momStatus === "processing") {
@@ -398,12 +416,27 @@ const Dashboard = () => {
       processing: "Transcribing audio, generating metrics, and building your MoM. This page will auto-update.",
     };
 
+    // "uploaded" is always index 0 and always done.
+    // Each event name IS the stage key, so we can look up index directly.
+    const stageOrder = ["uploaded", "transcription-completed", "analyzing-metrics-completed", "generating"];
+    const currentIndex = stageOrder.indexOf(processingStage);
+
+    const steps = [
+      { key: "uploaded", label: "Audio uploaded" },
+      { key: "transcription-completed", label: "Transcribing audio" },
+      { key: "analyzing-metrics-completed", label: "Analyzing metrics" },
+      { key: "generating", label: "Generating MoM" },
+    ].map((step, i) => ({
+      ...step,
+      done: i < currentIndex || (i === 0), // "uploaded" always ticked
+      active: i === currentIndex && momStatus === "processing",
+    }));
+
     return (
       <>
         <HeaderwoLogo />
         <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50 to-blue-50 flex items-center justify-center">
           <div className="text-center space-y-8 max-w-md px-6">
-            {/* Animated spinner */}
             <div className="relative mx-auto w-24 h-24">
               <div className="absolute inset-0 rounded-full border-4 border-indigo-100"></div>
               <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-indigo-600 animate-spin"></div>
@@ -423,20 +456,14 @@ const Dashboard = () => {
               <p className="text-slate-500 mt-2">{stageSubtext[momStatus]}</p>
             </div>
 
-            {/* Progress steps */}
             <div className="space-y-3 text-left bg-white/60 backdrop-blur rounded-2xl p-6 border border-white/50">
-              {[
-                { label: "Audio uploaded", done: true },
-                { label: "Transcribing audio", done: momStatus === "processing" },
-                { label: "Analyzing metrics", done: false },
-                { label: "Generating MoM", done: false },
-              ].map((step, i) => (
-                <div key={i} className="flex items-center gap-3">
+              {steps.map((step) => (
+                <div key={step.key} className="flex items-center gap-3">
                   <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs ${step.done ? 'bg-emerald-500 text-white' : 'border-2 border-slate-200'}`}>
                     {step.done && '✓'}
                   </div>
                   <span className={`text-sm font-medium ${step.done ? 'text-slate-800' : 'text-slate-400'}`}>{step.label}</span>
-                  {!step.done && i === (momStatus === "pending" ? 1 : 2) && (
+                  {step.active && (
                     <div className="w-4 h-4 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin ml-auto"></div>
                   )}
                 </div>
@@ -447,6 +474,9 @@ const Dashboard = () => {
       </>
     );
   }
+
+  
+  
 
   // --- Failed State ---
   if (momStatus === "failed") {
